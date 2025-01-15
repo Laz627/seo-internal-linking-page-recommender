@@ -45,70 +45,40 @@ def get_download_link(file_bytes: bytes, filename: str, file_label: str) -> str:
     return f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{file_label}</a>'
 
 
-def parse_openai_response(response_text: str):
+def parse_openai_response_strict(response_text: str):
     """
-    Given the raw response text from the OpenAI ChatCompletion,
-    attempt to parse it as JSON. Returns a list of dictionaries
-    with keys: 'target_url' and 'anchor_text'.
-
-    If parsing fails, return an empty list.
+    Attempt to parse the model response as JSON. Return an empty list if parsing fails.
     """
     try:
         data = json.loads(response_text)
         if isinstance(data, dict):
-            # In case the model accidentally returns a JSON object
+            # In case the model accidentally returns a single JSON object
             data = [data]
         return data
     except json.JSONDecodeError:
         return []
 
 
-def parse_openai_response_with_warning(response_text: str):
+def build_prompt(mode: str, topic: str, keyword: str, target_page: dict, candidate_pages: pd.DataFrame) -> str:
     """
-    Same as parse_openai_response, but warns the user if parsing fails.
+    Construct the prompt text for ChatCompletion.
     """
-    parsed = parse_openai_response(response_text)
-    if not parsed:
-        st.warning("Unable to parse the model response as valid JSON.")
-    return parsed
-
-
-def build_prompt(
-    mode: str, 
-    topic: str, 
-    keyword: str, 
-    target_page: dict, 
-    candidate_pages: pd.DataFrame
-) -> str:
-    """
-    Construct the prompt text that will be sent to the OpenAI ChatCompletion API.
-
-    :param mode: "brand_new" or "existing_page"
-    :param topic: The main topic input by the user
-    :param keyword: Optional target keyword
-    :param target_page: dict with "URL", "H1", "Meta Description" 
-                       (only used if mode == "existing_page")
-    :param candidate_pages: DataFrame of pages to consider for internal linking
-    """
-
     if mode == "brand_new":
-        # For a brand-new topic/page, we have no real "target URL" in the dataset
-        # We'll pass a placeholder URL and H1 to GPT, but clarify it's brand-new
+        # Brand new page / no existing URL
         target_url = "N/A (brand-new page, not published yet)"
         target_h1 = f"{topic} (New Topic)"
         target_meta = f"A future page about {topic}."
-        brand_new_info = """
-This is a brand-new topic or page that doesn't exist yet.
-Recommend internal links from the pages below that are thematically relevant
-and provide anchor text suggestions that are semantically aligned with
-the new topic.
-"""
+        brand_new_msg = (
+            "This is a brand-new topic or page that doesn't exist yet.\n"
+            "Recommend internal links from the pages below that are thematically relevant\n"
+            "and provide anchor text suggestions that are semantically aligned with\n"
+            "the new topic.\n"
+        )
     else:
-        # Existing page scenario
         target_url = target_page["URL"]
         target_h1 = target_page["H1"]
         target_meta = target_page["Meta Description"]
-        brand_new_info = ""
+        brand_new_msg = ""
 
     pages_info = []
     for _, row in candidate_pages.iterrows():
@@ -118,89 +88,76 @@ the new topic.
             "Meta Description": row["Meta Description"]
         })
 
-    # Provide a more explicit instruction for strict JSON output
     prompt = f"""
-You are an SEO assistant. The user wants to generate internal link recommendations.
+You are an SEO assistant. The user wants internal link recommendations.
 
 Mode: {mode}
 Topic: {topic}
 Target Keyword (optional): {keyword}
 
-{brand_new_info}
+{brand_new_msg}
 
 Target Page Information:
 - Target Page URL: {target_url}
 - Target Page H1: {target_h1}
 - Target Page Meta Description: {target_meta}
 
-Below is a list of other pages (candidate link targets) on the site, in JSON format:
+Here is a list of other pages (candidate link targets) on the site in JSON format:
 
 {json.dumps(pages_info, indent=2)}
 
-Please propose a list of internal links (FROM the pages listed above) that are most semantically relevant
-to this topic. For each recommended link, provide an optimized anchor text that is user-friendly, 
-semantically relevant, and rich with context.
+Instructions:
+1. Identify the most semantically relevant pages from this list.
+2. For each recommended link, provide an optimized anchor text (5-10 words ideally) 
+   that is user-friendly and semantically relevant to the topic.
+3. Return your response strictly in JSON. No extra text. The JSON must be an array of objects,
+   each object having:
+   - "target_url": The URL to link FROM
+   - "anchor_text": The anchor text
 
-Return the result as valid JSON (strictly no extra text). The JSON must be an array of objects,
-where each object has these keys:
-- "target_url": The URL of the page to link FROM
-- "anchor_text": The anchor text for the link
-
-Example JSON response:
+Example JSON format:
 [
   {{
     "target_url": "https://example.com/page-1",
-    "anchor_text": "Relevant anchor text"
+    "anchor_text": "Semantic anchor text example"
   }},
   {{
     "target_url": "https://example.com/page-2",
     "anchor_text": "Another relevant anchor text"
   }}
 ]
-"""
+""".strip()
     return prompt
 
 
-def generate_internal_links(
-    openai_api_key: str, 
-    mode: str,
-    topic: str, 
-    keyword: str, 
-    target_page: dict, 
-    candidate_pages: pd.DataFrame
-):
+def generate_internal_links(openai_api_key: str, mode: str, topic: str, keyword: str, target_page: dict, candidate_pages: pd.DataFrame):
     """
     Calls the OpenAI ChatCompletion API to generate internal link recommendations.
-    Mode can be "brand_new" or "existing_page".
+    Returns a list of {target_url, anchor_text} dicts.
     """
-    # Set up the OpenAI API key
     openai.api_key = openai_api_key
-
-    # Build the prompt
     prompt = build_prompt(mode, topic, keyword, target_page, candidate_pages)
 
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # or "gpt-4o-2024-05-13", etc.
+            model="gpt-4o-mini",  # e.g. "gpt-4o-2024-05-13", etc.
             messages=[
-                {
-                    "role": "system", 
-                    "content": "You are a helpful AI assistant specialized in SEO recommendations."
-                },
+                {"role": "system", "content": "You are a helpful SEO assistant. Return only valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=1000,
-            temperature=0.7
+            temperature=0.0  # Lower temperature => more predictable, JSON-friendly
         )
-
         response_text = response.choices[0].message["content"].strip()
-        links = parse_openai_response_with_warning(response_text)
+
+        # Attempt to parse strictly as JSON
+        links = parse_openai_response_strict(response_text)
+
         return links
 
     except Exception as e:
         st.error(f"Error in OpenAI API call: {e}")
         return []
-
 
 def convert_to_excel(df: pd.DataFrame) -> bytes:
     """
@@ -211,13 +168,12 @@ def convert_to_excel(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False, sheet_name="InternalLinkSuggestions")
     return buffer.getvalue()
 
-
 ###############################################################################
 # Vectorization, Batch Embedding, and Semantic Search
 ###############################################################################
 def embed_text_batch(openai_api_key: str, texts: list[str]) -> list[list[float]]:
     """
-    Generates embeddings for a batch of texts in a single API call using OpenAI's Embeddings API.
+    Generates embeddings for a batch of texts in a single API call.
     Returns a list of embeddings, one per input text.
     """
     openai.api_key = openai_api_key
@@ -226,31 +182,20 @@ def embed_text_batch(openai_api_key: str, texts: list[str]) -> list[list[float]]
             model="text-embedding-ada-002",
             input=texts
         )
-        # The embeddings come back in "data" in the same order as the input
         embeddings = [item["embedding"] for item in response["data"]]
         return embeddings
     except Exception as e:
         st.error(f"Error generating batch embeddings: {e}")
         return [[] for _ in texts]
 
-
 def compute_cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
-    """
-    Computes the cosine similarity between two vectors.
-    """
     if np.linalg.norm(vec_a) == 0 or np.linalg.norm(vec_b) == 0:
         return 0.0
     return float(np.dot(vec_a, vec_b) / (np.linalg.norm(vec_a) * np.linalg.norm(vec_b)))
 
-
 def embed_pages_in_batches(df: pd.DataFrame, openai_api_key: str, batch_size: int = 10) -> pd.DataFrame:
-    """
-    Compute embeddings for each page in batches (reducing the number of API calls).
-    Adds a new column "embedding" to the DataFrame.
-    """
     st.info("Embedding pages in batches. Please wait...")
 
-    # We'll combine URL + H1 + Meta Description
     texts = []
     for _, row in df.iterrows():
         combined_text = f"{row['URL']} {row['H1']} {row['Meta Description']}"
@@ -267,109 +212,84 @@ def embed_pages_in_batches(df: pd.DataFrame, openai_api_key: str, batch_size: in
     df["embedding"] = all_embeddings
     return df
 
-
 def embed_query(query: str, openai_api_key: str) -> np.ndarray:
-    """
-    Embed a single query string (topic + keyword).
-    """
     results = embed_text_batch(openai_api_key, [query])
     return np.array(results[0]) if results else np.array([])
 
-
 def semantic_search(df: pd.DataFrame, query: str, openai_api_key: str, top_k: int = 10) -> pd.DataFrame:
-    """
-    Given a DataFrame of pages (with "embedding" column),
-    embed the query, compute similarity, and return top_k results (sorted by similarity).
-    """
     query_embedding = embed_query(query, openai_api_key)
     if query_embedding.size == 0:
-        return df.head(0)  # Return empty if something went wrong
+        return df.head(0)
 
     similarities = []
-    for idx, row in df.iterrows():
+    for _, row in df.iterrows():
         page_embedding = row["embedding"]
-        similarity = compute_cosine_similarity(
-            query_embedding, 
-            np.array(page_embedding)
-        )
+        similarity = compute_cosine_similarity(query_embedding, np.array(page_embedding))
         similarities.append(similarity)
 
     df["similarity"] = similarities
-    # Sort by descending similarity
     df_sorted = df.sort_values(by="similarity", ascending=False)
-    # Return top_k
     return df_sorted.head(top_k)
 
 ###############################################################################
 # Streamlit App
 ###############################################################################
 def main():
-    st.title("Internal Link Recommender Tool (Batch Embedding + Brand New / Existing Mode)")
+    st.title("Internal Link Recommender Tool (Two-Step Flow)")
     st.write("""
-    This application helps SEO professionals generate internal link recommendations
-    for a specific topic/keyword.
-    
-    You can choose:
-    - A brand-new topic with no existing page
-    - An existing page in your dataset
+    This version separates the workflow:
+    1) Upload file, choose brand-new or existing, embed pages.
+    2) If existing, pick your target page. Then generate links.
     """)
 
-    # Provide a link to download the sample Excel template
-    st.subheader("1. Download Sample Excel Template")
+    # --- SAMPLE TEMPLATE DOWNLOAD ---
+    st.subheader("Step A: Download Sample Template (Optional)")
     template_bytes = generate_sample_excel_template()
-    template_link = get_download_link(
-        template_bytes,
-        "sample_template.xlsx",
-        "Click here to download the sample Excel template."
-    )
+    template_link = get_download_link(template_bytes, "sample_template.xlsx", "Download Sample Excel Template")
     st.markdown(template_link, unsafe_allow_html=True)
 
-    # File Uploader
-    st.subheader("2. Upload Your Website Pages CSV or Excel File")
+    # --- FILE UPLOAD ---
+    st.subheader("Step B: Upload Your CSV or Excel")
     uploaded_file = st.file_uploader(
-        "Upload a CSV or Excel file with columns: URL, H1, Meta Description",
+        "Upload a CSV or Excel with columns: URL, H1, Meta Description",
         type=["csv", "xlsx"]
     )
 
-    # Mode Selector
-    st.subheader("3. Choose Topic Mode")
-    mode = st.radio(
-        "Is this a brand-new topic (no existing URL) or do you want to optimize an existing page?",
-        options=["Brand-New Topic/Page", "Optimize Existing Page"]
+    # --- MODE SELECT ---
+    st.subheader("Step C: Pick Mode (Brand-New or Existing)")
+    mode_option = st.radio(
+        "Internal Linking Mode",
+        ["Brand-New Topic/Page", "Optimize Existing Page"]
     )
 
-    # Text inputs: Topic and optional Target Keyword
-    st.subheader("4. Enter Your Topic and Optional Target Keyword")
-    topic = st.text_input("Topic", help="Enter the main topic for which you want to generate internal links.")
-    keyword = st.text_input("Target Keyword (optional)", help="Enter a target keyword to fine-tune semantic relevance.")
+    # --- TOPIC + KEYWORD ---
+    topic = st.text_input("Topic", help="e.g., 'Best Coffee Beans'")
+    keyword = st.text_input("Optional Keyword", help="Refine semantic focus")
 
-    # OpenAI API Key input (type='password' for security)
-    st.subheader("5. Enter Your OpenAI API Key")
-    openai_api_key = st.text_input(
-        "OpenAI API Key",
-        type="password",
-        help="Your OpenAI API key. Get yours at https://platform.openai.com/."
-    )
+    # --- OPENAI KEY ---
+    openai_api_key = st.text_input("OpenAI API Key", type="password")
 
-    # Batch Size selection
-    st.subheader("Optional: Set Batch Size for Embedding")
-    batch_size = st.slider("Number of pages to embed per request", min_value=1, max_value=50, value=10)
+    # --- EMBEDDING BATCH SIZE ---
+    batch_size = st.slider("Batch Size for Embeddings", min_value=1, max_value=50, value=10)
 
-    # Create a button to trigger link generation
-    if st.button("Generate Links"):
+    # Create placeholders to store data after embedding
+    st.write("Click 'Embed Pages' first before generating links.")
+    embed_button = st.button("Embed Pages")
+
+    if embed_button:
         if not uploaded_file:
-            st.error("Please upload a CSV or Excel file.")
-            return
-        
+            st.error("Please upload a CSV or Excel file first.")
+            st.stop()
+
         if not topic:
             st.error("Please enter a topic.")
-            return
-        
-        if not openai_api_key:
-            st.error("Please enter your OpenAI API key.")
-            return
+            st.stop()
 
-        # Read the uploaded file into a pandas DataFrame
+        if not openai_api_key:
+            st.error("Please provide an OpenAI API key.")
+            st.stop()
+
+        # Read file
         try:
             if uploaded_file.name.endswith(".csv"):
                 df = pd.read_csv(uploaded_file)
@@ -377,120 +297,110 @@ def main():
                 df = pd.read_excel(uploaded_file)
         except Exception as e:
             st.error(f"Error reading file: {e}")
-            return
+            st.stop()
 
-        # Check for required columns
-        required_columns = {"URL", "H1", "Meta Description"}
-        if not required_columns.issubset(df.columns):
-            st.error(f"Uploaded file must contain columns: {', '.join(required_columns)}")
-            return
+        # Validate columns
+        required_cols = {"URL", "H1", "Meta Description"}
+        if not required_cols.issubset(df.columns):
+            st.error(f"Please ensure these columns exist: {', '.join(required_cols)}")
+            st.stop()
 
-        # Build embeddings for each page in batches
-        try:
-            df = embed_pages_in_batches(df, openai_api_key, batch_size=batch_size)
-        except Exception as e:
-            st.error(f"Error building embeddings: {e}")
-            return
+        # Embed pages
+        df = embed_pages_in_batches(df, openai_api_key, batch_size)
+        st.session_state["embedded_df"] = df
+        st.session_state["mode"] = mode_option
+        st.session_state["topic"] = topic
+        st.session_state["keyword"] = keyword
+        st.session_state["api_key"] = openai_api_key
+        st.success("Pages embedded successfully! Now proceed to Step D below.")
 
-        # If user picked brand-new topic:
-        if mode == "Brand-New Topic/Page":
-            # We have no target page in the dataset. We'll pass a dummy dictionary.
+    # Now Step D: If the pages are embedded, we can choose the existing URL (if mode is existing)
+    if "embedded_df" in st.session_state:
+        st.subheader("Step D: Generate Internal Links")
+
+        df_after_embedding = st.session_state["embedded_df"]
+        mode = st.session_state["mode"]
+        final_topic = st.session_state["topic"]
+        final_keyword = st.session_state["keyword"]
+        final_api_key = st.session_state["api_key"]
+
+        if mode == "Optimize Existing Page":
+            st.write("Select your target page URL for optimization:")
+            url_options = df_after_embedding["URL"].unique().tolist()
+            selected_url = st.selectbox("Target Page URL", url_options)
+            target_page_data = df_after_embedding.loc[df_after_embedding["URL"] == selected_url].iloc[0].to_dict()
+            internal_mode = "existing_page"
+        else:
+            # brand-new
+            st.write("You chose a brand-new topic/page. No URL to select.")
             target_page_data = {
                 "URL": "N/A",
-                "H1": "New Topic Page (not published)",
-                "Meta Description": f"Future page about {topic}"
+                "H1": f"(New) {final_topic}",
+                "Meta Description": f"Future page about {final_topic}"
             }
-            internal_links_mode = "brand_new"
-        else:
-            # Optimize existing page
-            st.write("**Select the Target Page** from the list below:")
-            target_pages = df["URL"].unique().tolist()
-            selected_url = st.selectbox(
-                "Choose a URL to serve as the target page for new internal links:",
-                options=target_pages
-            )
-            target_page_data = df.loc[df["URL"] == selected_url].iloc[0].to_dict()
-            internal_links_mode = "existing_page"
+            internal_mode = "brand_new"
 
-        # Exclude the target page from candidate pages if we have an actual URL
-        if internal_links_mode == "existing_page":
-            candidate_df = df.loc[df["URL"] != target_page_data["URL"]].copy()
-        else:
-            # brand_new case: all pages are candidates
-            candidate_df = df.copy()
+        # Button to run the link generation
+        if st.button("Generate Links"):
+            candidate_df = df_after_embedding.copy()
+            if internal_mode == "existing_page":
+                candidate_df = candidate_df.loc[candidate_df["URL"] != target_page_data["URL"]]
 
-        # Combine the topic and keyword into a query for semantic search
-        query_text = topic if not keyword else f"{topic} {keyword}"
+            # Perform semantic search
+            query_text = final_topic if not final_keyword else f"{final_topic} {final_keyword}"
+            top_k = 20
+            best_matches = semantic_search(candidate_df, query_text, final_api_key, top_k=top_k)
 
-        # Find top K most relevant pages using semantic search
-        top_k = 20  
-        best_matches = semantic_search(candidate_df, query_text, openai_api_key, top_k=top_k)
+            # Filter by similarity
+            threshold = 0.50
+            filtered = best_matches[best_matches["similarity"] >= threshold].copy()
 
-        # Apply a similarity threshold of 0.50
-        threshold = 0.50
-        filtered_matches = best_matches[best_matches["similarity"] >= threshold].copy()
-
-        # Now we pass these filtered matches to the GPT prompt
-        links = generate_internal_links(
-            openai_api_key,
-            internal_links_mode,
-            topic,
-            keyword,
-            target_page_data,
-            filtered_matches[["URL", "H1", "Meta Description"]]
-        )
-
-        # Display results
-        if links:
-            # Convert links to a DataFrame
-            results_df = pd.DataFrame(links)
-
-            # Merge the similarity scores for each URL
-            # "target_url" in GPT results corresponds to "URL" in df
-            # We'll add the similarity column to results
-            merged_df = pd.merge(
-                results_df,
-                filtered_matches[["URL", "similarity"]],
-                left_on="target_url",
-                right_on="URL",
-                how="left"
+            # Generate GPT-based recommendations
+            links = generate_internal_links(
+                final_api_key,
+                internal_mode,
+                final_topic,
+                final_keyword,
+                target_page_data,
+                filtered[["URL", "H1", "Meta Description"]]
             )
 
-            # Clean up DataFrame (remove duplicate column)
-            merged_df.drop(columns=["URL"], inplace=True, errors="ignore")
-
-            # Rename 'similarity' column for clarity
-            if "similarity" in merged_df.columns:
-                merged_df.rename(columns={"similarity": "similarity_score"}, inplace=True)
-
-            st.subheader("Internal Link Recommendations")
-            if merged_df.empty:
-                st.warning("The model returned data, but we couldn't merge any similarity scores. "
-                           "This could indicate the model recommended URLs outside your dataset.")
+            if not links:
+                st.warning("No recommendations were returned or the JSON was invalid.\n"
+                           "Try adjusting your topic or keyword, or reduce temperature further.")
             else:
+                # Convert to DataFrame
+                results_df = pd.DataFrame(links)
+                # Merge similarity
+                merged_df = pd.merge(
+                    results_df,
+                    filtered[["URL", "similarity"]],
+                    left_on="target_url",
+                    right_on="URL",
+                    how="left"
+                )
+                merged_df.drop(columns=["URL"], inplace=True, errors="ignore")
+                if "similarity" in merged_df.columns:
+                    merged_df.rename(columns={"similarity": "similarity_score"}, inplace=True)
+
                 st.dataframe(merged_df)
 
-            # Download options
-            st.subheader("Download Your Results")
-            # 1) CSV
-            csv_data = merged_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                label="Download as CSV",
-                data=csv_data,
-                file_name=f"internal_link_recommendations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
+                # Download options
+                csv_data = merged_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download as CSV",
+                    csv_data,
+                    file_name=f"internal_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
 
-            # 2) Excel
-            excel_data = convert_to_excel(merged_df)
-            st.download_button(
-                label="Download as Excel",
-                data=excel_data,
-                file_name=f"internal_link_recommendations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        else:
-            st.warning("No recommendations were returned. Please try again or adjust your topic/keyword.")
+                excel_data = convert_to_excel(merged_df)
+                st.download_button(
+                    "Download as Excel",
+                    excel_data,
+                    file_name=f"internal_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
 if __name__ == "__main__":
     main()
