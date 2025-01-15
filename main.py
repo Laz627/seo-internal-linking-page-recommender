@@ -238,7 +238,7 @@ def generate_internal_links(openai_api_key:str, mode:str, topic:str, keyword:str
                     "content":prompt_text
                 }
             ],
-            max_tokens=1500,
+            max_tokens=8000,
             temperature=0.0
         )
         raw_response = resp.choices[0].message["content"].strip()
