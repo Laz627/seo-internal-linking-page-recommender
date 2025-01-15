@@ -362,8 +362,8 @@ def main():
             st.stop()
 
         # Validate site pages
-        if not df_pages:
-            st.error("Please upload site pages first.")
+        if df_pages is None or df_pages.empty:
+            st.error("Please upload site pages first or ensure your CSV/Excel isn't empty.")
             st.stop()
         required_cols = {"URL", "H1", "Meta Description"}
         if not required_cols.issubset(df_pages.columns):
