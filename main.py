@@ -35,7 +35,6 @@ def generate_sample_excel_template():
     buffer.seek(0)
     return buffer.getvalue()
 
-
 def get_download_link(file_bytes: bytes, filename: str, link_label: str) -> str:
     """
     Generate a download link for an in-memory file (BytesIO).
@@ -43,8 +42,10 @@ def get_download_link(file_bytes: bytes, filename: str, link_label: str) -> str:
     b64 = base64.b64encode(file_bytes).decode()
     return f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{link_label}</a>'
 
-
 def compute_cosine_similarity(vec_a, vec_b) -> float:
+    """
+    Computes cosine similarity between two vectors.
+    """
     if np.linalg.norm(vec_a) == 0 or np.linalg.norm(vec_b) == 0:
         return 0.0
     return float(np.dot(vec_a, vec_b) / (np.linalg.norm(vec_a) * np.linalg.norm(vec_b)))
@@ -69,7 +70,6 @@ def parse_word_doc_paragraphs_only(doc_bytes: bytes):
         if not text:
             continue
         style_name = para.style.name.lower() if para.style else ""
-        # skip if recognized as heading
         if "heading" not in style_name:
             paragraphs.append({"content": text})
     return paragraphs
@@ -91,10 +91,9 @@ def embed_text_batch(openai_api_key: str, texts: list[str], model="text-embeddin
         st.error(f"Error generating embeddings: {e}")
         return [[] for _ in texts]
 
-
 def embed_site_pages(df: pd.DataFrame, openai_api_key: str, batch_size: int = 10):
     """
-    For each row in df, embed (URL + H1 + Meta Description) in batches => store in df["embedding"].
+    For each row, combine (URL + H1 + Meta Description) => embed in batches => store df["embedding"].
     """
     st.info("Embedding site pages in batches...")
     rows = len(df)
@@ -122,19 +121,9 @@ def embed_site_pages(df: pd.DataFrame, openai_api_key: str, batch_size: int = 10
     df["embedding"] = all_embeddings
     return df
 
-
 def embed_doc_paragraphs(paragraphs: list[dict], openai_api_key: str, batch_size: int = 10):
     """
     Each paragraph is embedded as a single chunk, plus we embed each paragraph's sentences.
-    Return a list of dicts: 
-      [
-        {
-          "content": str, 
-          "embedding": <vec>, 
-          "sentences": [ (sentence_text, sentence_embedding), ... ]
-        },
-        ...
-      ]
     """
     st.info("Embedding doc paragraphs in batches...")
 
@@ -299,12 +288,13 @@ def main():
     1) **Brand-New Topic/Page** (GPT-based)  
     2) **Optimize Existing Page** (GPT-based)  
     3) **Analyze Word Document** (embeddings only, no GPT):
-       - Each paragraph picks exactly **1** site page (highest similarity ≥ 80%)
-       - UI displays the paragraph text, plus the single recommended link and similarity score
+       - Each site page is referenced **only once** across all paragraphs
+       - We pick the **single best** paragraph (≥80% similarity) for each page
+       - The UI highlights that paragraph text plus the page link & similarity
     """)
 
     # Step 1: Download sample site template
-    st.subheader("Step 1: (Optional) Download Sample Site Template")
+    st.subheader("Step 1: (Optional) Download Site Template")
     sample_xlsx = generate_sample_excel_template()
     link = get_download_link(sample_xlsx, "sample_template.xlsx", "Download Sample Excel Template")
     st.markdown(link, unsafe_allow_html=True)
@@ -348,7 +338,7 @@ def main():
             try:
                 docx_data = doc_file.read()
                 doc_paragraphs = parse_word_doc_paragraphs_only(docx_data)
-                st.success(f"Found {len(doc_paragraphs)} paragraphs.")
+                st.success(f"Found {len(doc_paragraphs)} paragraphs (excluding headings).")
             except Exception as e:
                 st.error(f"Error parsing Word doc: {e}")
 
@@ -419,8 +409,7 @@ def main():
         final_keyword = st.session_state["keyword"]
         final_url = st.session_state.get("selected_url", None)
 
-        # 80% threshold
-        threshold = 0.80
+        threshold = 0.80  # 80% similarity threshold
 
         if final_mode in ["Brand-New Topic/Page", "Optimize Existing Page"]:
             # GPT-based approach
@@ -431,10 +420,8 @@ def main():
                     st.error("Selected URL not found.")
                     st.stop()
 
-                # Exclude target from candidates
                 candidate_df = df_pages_emb.loc[df_pages_emb["URL"] != final_url].copy()
 
-                # Optional semantic filter
                 if final_topic:
                     query_str = final_topic + " " + final_keyword if final_keyword else final_topic
                     q_emb = embed_text_batch(openai_api_key, [query_str])
@@ -445,7 +432,6 @@ def main():
                             sims.append(sim_val)
                         candidate_df["similarity"] = sims
                         candidate_df = candidate_df.sort_values("similarity", ascending=False)
-                        # We only keep pages above 80% if we want to be consistent
                         candidate_df = candidate_df[candidate_df["similarity"] >= threshold]
 
                 final_links = generate_internal_links(
@@ -460,18 +446,18 @@ def main():
                 if not final_links:
                     st.warning("No recommendations or GPT returned invalid JSON.")
                 else:
-                    # Display in a more user-friendly UI
                     st.subheader("Optimize Existing Page Results")
                     for link_item in final_links:
-                        st.markdown(f"- **Page Link**: [{link_item.get('anchor_text','(No Title)')}]({link_item.get('target_url','')})")
-                        # We interpret 'anchor_text' as the "Proposed Anchor Text" from GPT
-                        # If we have 'similarity', show it
-                        similarity_val = link_item.get("similarity", None)
-                        if similarity_val is not None:
-                            st.markdown(f"  - **Similarity Score**: {round(similarity_val*100,2)}%")
+                        # Proposed link
+                        anchor_text = link_item.get("anchor_text","(No Anchor)")
+                        page_url = link_item.get("target_url","")
+                        st.markdown(f"- **Page Link**: [{anchor_text}]({page_url})")
+                        sim_val = link_item.get("similarity", None)
+                        if sim_val is not None:
+                            st.markdown(f"  - **Similarity Score**: {round(sim_val*100,2)}%")
 
             else:
-                # Brand-New
+                # Brand-new
                 if final_topic:
                     query_str = final_topic + " " + final_keyword if final_keyword else final_topic
                     q_emb = embed_text_batch(openai_api_key, [query_str])
@@ -502,83 +488,80 @@ def main():
                 else:
                     st.subheader("Brand-New Topic Results")
                     for link_item in final_links:
-                        st.markdown(f"- **Page Link**: [{link_item.get('anchor_text','(No Title)')}]({link_item.get('target_url','')})")
+                        anchor_text = link_item.get("anchor_text","(No Anchor)")
+                        page_url = link_item.get("target_url","")
+                        st.markdown(f"- **Page Link**: [{anchor_text}]({page_url})")
                         sim_val = link_item.get("similarity", None)
                         if sim_val is not None:
                             st.markdown(f"  - **Similarity Score**: {round(sim_val*100,2)}%")
 
         else:
-            # Word Doc Mode => each paragraph picks exactly 1 link above 80% similarity
+            # Word Doc Mode => Each site page is used exactly once for its best matching paragraph (≥80%).
             if not doc_data:
                 st.error("No doc paragraphs found. Please embed the doc first.")
                 st.stop()
 
-            # We do top_k=1
+            st.write(f"**Each page links once** across all paragraphs (≥ {threshold*100}% similarity).")
             paragraphs_count = len(doc_data)
-            st.write(f"**Generating 1 link per paragraph (threshold {threshold}, top_k=1).**")
 
-            final_output = []
-            progress_bar = st.progress(0)
-            label = st.empty()
+            # Convert doc_data to a DataFrame for easy indexing
+            doc_df = pd.DataFrame(doc_data)  # columns: content, embedding, sentences, ...
+            # We'll compute a similarity matrix: (pages) x (paragraphs)
+            # Then for each page, pick the best paragraph
+            results_list = []
 
-            for p_idx, p_dict in enumerate(doc_data):
-                progress_val = int(((p_idx+1)/paragraphs_count)*100)
-                progress_bar.progress(progress_val)
-                label.write(f"Processing Paragraph {p_idx+1}/{paragraphs_count}")
-
-                para_vec = np.array(p_dict["embedding"])
-                paragraph_text = p_dict["content"]
-
-                # find the single best site page
+            for i, page_row in df_pages_emb.iterrows():
+                page_vec = np.array(page_row["embedding"])
                 best_sim = -1.0
-                best_page_row = None
-                for i, page_row in df_pages_emb.iterrows():
-                    page_vec = np.array(page_row["embedding"])
-                    sim_val = compute_cosine_similarity(para_vec, page_vec)
+                best_para_idx = -1
+                for j, doc_row in doc_df.iterrows():
+                    para_vec = np.array(doc_row["embedding"])
+                    sim_val = compute_cosine_similarity(page_vec, para_vec)
                     if sim_val > best_sim:
                         best_sim = sim_val
-                        best_page_row = page_row
+                        best_para_idx = j
+                # if best_sim >= threshold => keep
+                if best_sim >= threshold:
+                    results_list.append({
+                        "page_url": page_row["URL"],
+                        "page_title": page_row["H1"],
+                        "paragraph_index": best_para_idx,
+                        "paragraph_text": doc_df.loc[best_para_idx,"content"],
+                        "similarity": best_sim
+                    })
+                else:
+                    # no paragraph > threshold => skip page
+                    pass
 
-                if best_sim < threshold:
-                    # skip
-                    continue
+            if not results_list:
+                st.warning("No pages found a paragraph above 80% similarity.")
+                return
 
-                # We have a best page above 80%
-                # We'll display in a more digestible format: highlight the paragraph, show the page link, similarity
-                final_output.append({
-                    "paragraph_index": p_idx,
-                    "paragraph_text": paragraph_text,
-                    "page_url": best_page_row["URL"],
-                    "page_title": best_page_row["H1"],
-                    "similarity_score": best_sim
-                })
+            # Let's display them. We'll group them by the chosen paragraph
+            # or we can just do "one expander per page" approach, or one big list.
+            st.subheader("Word Doc Results (One Link per Page)")
 
-            # Show the results in expanders
-            if not final_output:
-                st.warning("No paragraphs found a site page above 80% similarity.")
-            else:
-                st.subheader("Word Doc Linking Results (One Link per Paragraph)")
-                for item in final_output:
-                    p_idx = item["paragraph_index"]
-                    p_text = item["paragraph_text"]
-                    p_url = item["page_url"]
-                    p_title = item["page_title"]
-                    p_sim = item["similarity_score"]
-                    # Output using an expander
-                    with st.expander(f"Paragraph #{p_idx+1}"):
-                        st.markdown(f"> **Paragraph Text:**  \n> {p_text}\n")
-                        st.markdown(f"- **Proposed Link**: [{p_title}]({p_url})")
-                        st.markdown(f"- **Similarity Score**: {round(p_sim*100,2)}%")
+            for item in results_list:
+                p_text = item["paragraph_text"]
+                p_url = item["page_url"]
+                p_title = item["page_title"]
+                p_sim = item["similarity"]
 
-                # Optionally produce a CSV
-                df_final = pd.DataFrame(final_output)
-                st.subheader("Download CSV of Word Doc Results")
-                csv_data = df_final.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "Download CSV",
-                    csv_data,
-                    file_name=f"word_doc_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                )
+                # Show the relevant paragraph text, plus link
+                with st.expander(f"{p_title}"):
+                    st.markdown(f"> **Paragraph Text**:\n> {p_text}\n")
+                    st.markdown(f"- **Page Link**: [{p_title}]({p_url})")
+                    st.markdown(f"- **Similarity Score**: {round(p_sim*100,2)}%")
+
+            # Provide a CSV
+            df_final = pd.DataFrame(results_list)
+            st.subheader("Download CSV of Word Doc Results")
+            csv_data = df_final.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download CSV",
+                csv_data,
+                file_name=f"word_doc_unique_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            )
 
 if __name__ == "__main__":
     main()
