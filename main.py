@@ -245,7 +245,7 @@ def embed_query(query: str, openai_api_key: str) -> np.ndarray:
     return np.array(results[0]) if results else np.array([])
 
 
-def semantic_search(df: pd.DataFrame, query: str, openai_api_key: str, top_k: int = 10) -> pd.DataFrame:
+def semantic_search(df: pd.DataFrame, query: str, openai_api_key: str, top_k: int = 50) -> pd.DataFrame:
     query_embedding = embed_query(query, openai_api_key)
     if query_embedding.size == 0:
         return df.head(0)
@@ -418,7 +418,7 @@ def main():
 
             # Now do semantic search
             query_text = final_topic if not final_keyword else f"{final_topic} {final_keyword}"
-            top_k = 20
+            top_k = 50
             best_matches = semantic_search(candidate_df, query_text, final_api_key, top_k=top_k)
 
             # filter by 0.50 similarity
