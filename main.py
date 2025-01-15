@@ -8,6 +8,7 @@ import numpy as np
 from openpyxl import Workbook
 from datetime import datetime
 from docx import Document
+import re
 
 ###############################################################################
 # 1. Helper Functions
@@ -26,7 +27,7 @@ def generate_sample_excel_template():
     ws["B1"] = "H1"
     ws["C1"] = "Meta Description"
 
-    # (Optional) Populate a sample row
+    # (Optional) Sample row
     ws["A2"] = "https://example.com/sample-page"
     ws["B2"] = "Sample Page Title"
     ws["C2"] = "A sample meta description for demonstration."
@@ -45,28 +46,24 @@ def get_download_link(file_bytes: bytes, filename: str, link_label: str) -> str:
     return f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{link_label}</a>'
 
 
-def parse_openai_json(response_text: str):
+def compute_cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
     """
-    Attempt to parse GPT response as JSON. Return an empty list if parsing fails.
+    Computes cosine similarity between two vectors.
     """
-    try:
-        data = json.loads(response_text)
-        if isinstance(data, dict):
-            data = [data]
-        return data
-    except json.JSONDecodeError:
-        return []
+    if np.linalg.norm(vec_a) == 0 or np.linalg.norm(vec_b) == 0:
+        return 0.0
+    return float(np.dot(vec_a, vec_b) / (np.linalg.norm(vec_a) * np.linalg.norm(vec_b)))
 
 ###############################################################################
-# 2. Word Document Parsing (Paragraphs Only)
+# 2. Word Doc Parsing (Paragraphs only)
 ###############################################################################
-def parse_word_doc_paragraphs_only(file_obj: io.BytesIO):
+def parse_word_doc_paragraphs_only(file_obj: io.BytesIO) -> list[dict]:
     """
-    Extracts ONLY paragraphs from the .docx file, skipping any headings.
+    Extracts ONLY paragraphs from the .docx file, skipping headings.
 
-    Returns a list of dicts:
+    Returns a list of dict:
       [
-        { "type": "paragraph", "content": "...some text..." },
+        { "type": "paragraph", "content": "...text..." },
         ...
       ]
     """
@@ -78,20 +75,22 @@ def parse_word_doc_paragraphs_only(file_obj: io.BytesIO):
             continue
         style_name = para.style.name.lower() if para.style else ""
         if "heading" not in style_name:
-            # skip if it's recognized as heading
             paragraphs_only.append({"type": "paragraph", "content": text})
     return paragraphs_only
 
 ###############################################################################
-# 3. Embeddings + Similarity
+# 3. Embedding Utilities
 ###############################################################################
 def embed_text_batch(openai_api_key: str, texts: list[str], model="text-embedding-ada-002"):
     """
-    Batch-embed a list of texts using OpenAI's Embeddings API.
+    Embeds a batch of strings using the OpenAI Embeddings API in one request.
     """
     openai.api_key = openai_api_key
     try:
-        response = openai.Embedding.create(model=model, input=texts)
+        response = openai.Embedding.create(
+            model=model,
+            input=texts
+        )
         embeddings = [item["embedding"] for item in response["data"]]
         return embeddings
     except Exception as e:
@@ -99,19 +98,12 @@ def embed_text_batch(openai_api_key: str, texts: list[str], model="text-embeddin
         return [[] for _ in texts]
 
 
-def compute_cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
-    if np.linalg.norm(vec_a) == 0 or np.linalg.norm(vec_b) == 0:
-        return 0.0
-    return float(np.dot(vec_a, vec_b) / (np.linalg.norm(vec_a) * np.linalg.norm(vec_b)))
-
-
 def embed_site_pages_in_batches(df: pd.DataFrame, openai_api_key: str, batch_size: int = 10):
     """
-    For each row (page) in df, embed URL + H1 + Meta Description as a single chunk.
+    For each page (row), embed URL + H1 + Meta Description.
     """
     st.info("Embedding site pages. Please wait...")
 
-    # Prepare texts
     texts = []
     for _, row in df.iterrows():
         combined_text = f"{row['URL']} {row['H1']} {row['Meta Description']}"
@@ -124,19 +116,16 @@ def embed_site_pages_in_batches(df: pd.DataFrame, openai_api_key: str, batch_siz
     bar = st.progress(0)
     label = st.empty()
 
-    idx = 0
     for batch_idx in range(total_batches):
-        start = batch_idx * batch_size
-        end = start + batch_size
-        batch_texts = texts[start:end]
+        start_idx = batch_idx * batch_size
+        end_idx = start_idx + batch_size
+        batch_texts = texts[start_idx:end_idx]
         batch_embeddings = embed_text_batch(openai_api_key, batch_texts)
-
         all_embeddings.extend(batch_embeddings)
 
-        idx += 1
-        percentage = int(idx / total_batches * 100)
-        bar.progress(percentage)
-        label.write(f"Site pages batch {idx}/{total_batches}")
+        progress_val = int((batch_idx + 1) / total_batches * 100)
+        bar.progress(progress_val)
+        label.write(f"Processed batch {batch_idx+1}/{total_batches}")
 
     df["embedding"] = all_embeddings
     return df
@@ -144,15 +133,14 @@ def embed_site_pages_in_batches(df: pd.DataFrame, openai_api_key: str, batch_siz
 
 def embed_doc_paragraphs_in_batches(paragraphs: list[dict], openai_api_key: str, batch_size: int = 10):
     """
-    For each paragraph in the doc, embed the paragraph text.
-    Return a DataFrame with columns: type, content, embedding
+    Embeds each paragraph's text. Returns a DataFrame with columns:
+      - type: "paragraph"
+      - content: actual paragraph text
+      - embedding: the embedding vector
     """
-    st.info("Embedding doc paragraphs (no headings). Please wait...")
+    st.info("Embedding doc paragraphs. Please wait...")
 
-    # combine text
-    texts = []
-    for p in paragraphs:
-        texts.append(p["content"])
+    texts = [p["content"] for p in paragraphs]
 
     all_embeddings = []
     total = len(texts)
@@ -161,115 +149,52 @@ def embed_doc_paragraphs_in_batches(paragraphs: list[dict], openai_api_key: str,
     bar = st.progress(0)
     label = st.empty()
 
-    idx = 0
     for batch_idx in range(total_batches):
-        start = batch_idx * batch_size
-        end = start + batch_size
-        batch_texts = texts[start:end]
+        start_idx = batch_idx * batch_size
+        end_idx = start_idx + batch_size
+        batch_texts = texts[start_idx:end_idx]
         batch_embeddings = embed_text_batch(openai_api_key, batch_texts)
         all_embeddings.extend(batch_embeddings)
 
-        idx += 1
-        percentage = int(idx / total_batches * 100)
-        bar.progress(percentage)
-        label.write(f"Doc paragraphs batch {idx}/{total_batches}")
+        progress_val = int((batch_idx + 1) / total_batches * 100)
+        bar.progress(progress_val)
+        label.write(f"Paragraph batch {batch_idx+1}/{total_batches}")
 
-    # Build final DF
-    df_doc = pd.DataFrame(paragraphs)  # has columns type, content
+    df_doc = pd.DataFrame(paragraphs)  # columns: type, content
     df_doc["embedding"] = all_embeddings
     return df_doc
 
-###############################################################################
-# 4. GPT Prompt: "Pick substring from paragraph"
-###############################################################################
-def build_substring_prompt(paragraph_text: str, site_page: dict):
+def embed_sentences_in_paragraph(paragraph_text: str, openai_api_key: str):
     """
-    We ask GPT to identify a substring within the paragraph_text that best
-    matches the site_page content. The user wants to place the link on that substring,
-    rather than GPT inventing a brand new anchor text.
-
-    site_page has { "URL", "H1", "Meta Description" }
+    Split a single paragraph into sentences, embed each sentence,
+    return a list of (sentence, embedding).
     """
-    instructions = f"""
-You are an SEO assistant. 
-We have a paragraph of text:
----
-{paragraph_text}
----
+    # naive sentence split, can be improved
+    # e.g. re.split(r'(?<=[.!?])\s+', paragraph_text)
+    sentences = re.split(r'(?<=[.!?])\s+', paragraph_text.strip())
+    # remove empty strings
+    sentences = [s.strip() for s in sentences if s.strip()]
 
-We want to link TO this site page:
-URL: {site_page["URL"]}
-H1: {site_page["H1"]}
-Meta Description: {site_page["Meta Description"]}
-
-Instead of inventing a new anchor text, find a substring **exactly** from the paragraph 
-that best describes or correlates with this site page. 
-We want to place the hyperlink on that exact substring in the paragraph.
-Make sure the substring is short (up to ~10 words) and is relevant to the page content. 
-If there's no good substring, just return an empty array.
-
-Return strictly JSON, no extra text. Format:
-[
-  {{
-    "anchor_substring": "substring from the paragraph"
-  }}
-]
-"""
-    return instructions.strip()
-
-
-def pick_substring_for_link(
-    openai_api_key: str,
-    paragraph_text: str,
-    site_page: dict
-):
-    """
-    Calls GPT with build_substring_prompt. 
-    Expects GPT to return JSON with a key "anchor_substring" 
-    taken from the paragraph.
-    """
-    openai.api_key = openai_api_key
-    prompt = build_substring_prompt(paragraph_text, site_page)
-
-    try:
-        resp = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a helpful SEO assistant. Return valid JSON only."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=800,
-            temperature=0.0
-        )
-        text_out = resp.choices[0].message["content"].strip()
-        parsed = parse_openai_json(text_out)
-        return parsed
-    except Exception as e:
-        st.error(f"Error from GPT: {e}")
-        return []
+    # embed all at once
+    embeddings = embed_text_batch(openai_api_key, sentences)
+    return list(zip(sentences, embeddings))
 
 ###############################################################################
-# 5. Brand-New / Existing Page Logic (unchanged)
+# 4. Brand-New / Existing Page Logic (GPT-based)
 ###############################################################################
-def build_prompt_for_mode(
-    mode: str,
-    topic: str,
-    keyword: str,
-    target_data: dict,
-    candidate_pages: pd.DataFrame
-) -> str:
+def build_prompt_for_mode(mode: str, topic: str, keyword: str, target_data: dict, candidate_pages: pd.DataFrame) -> str:
     anchor_text_guidelines = """
 Anchor Text Best Practices:
 - Descriptive, concise, and relevant
-- Avoid overly generic text like 'click here', 'read more'
-- Avoid overly long or keyword-stuffed anchor text
-- The text should read naturally and reflect the linked page's content
+- Avoid 'click here', 'read more'
+- Avoid keyword stuffing or overly long anchor text
+- Should read naturally and reflect the linked page
 """
 
     if mode == "brand_new":
         brand_new_msg = (
             "Brand-new topic/page that doesn't exist yet.\n"
-            "Recommend internal links from the site pages below.\n"
+            "Recommend internal links from these site pages.\n"
         )
         target_url = "N/A"
         target_h1 = f"{topic} (New Topic)"
@@ -319,22 +244,16 @@ Return strictly JSON (no extra text). The JSON must be an array of objects:
     return prompt
 
 
-def generate_internal_links(
-    openai_api_key: str,
-    mode: str,
-    topic: str,
-    keyword: str,
-    target_data: dict,
-    candidate_pages: pd.DataFrame
-):
+def generate_internal_links(openai_api_key: str, mode: str, topic: str, keyword: str,
+                            target_data: dict, candidate_pages: pd.DataFrame):
     """
-    For brand-new or existing mode, calls GPT once for the entire set of candidate pages.
+    For brand-new or existing mode, calls GPT for a single JSON response.
     """
     openai.api_key = openai_api_key
     prompt = build_prompt_for_mode(mode, topic, keyword, target_data, candidate_pages)
 
     try:
-        response = openai.ChatCompletion.create(
+        resp = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": "You are a helpful SEO assistant. Return valid JSON only."},
@@ -343,36 +262,40 @@ def generate_internal_links(
             temperature=0.0,
             max_tokens=2000
         )
-        text_out = response.choices[0].message["content"].strip()
-        parsed = parse_openai_json(text_out)
-        return parsed
+        text_out = resp.choices[0].message["content"].strip()
+        data = json.loads(text_out)
+        if isinstance(data, dict):
+            data = [data]
+        return data
     except Exception as e:
-        st.error(f"Error in GPT call: {e}")
+        st.error(f"Error calling GPT: {e}")
         return []
 
 ###############################################################################
-# 6. The Streamlit App
+# 5. Streamlit App
 ###############################################################################
 def main():
-    st.title("Internal Link Recommender (3 Modes, Paragraph-Only Word Doc)")
+    st.title("Internal Link Recommender (3 Modes, No GPT for Word Doc)")
 
     st.write("""
     **Modes**:
-    1) **Brand-New Topic/Page**: no existing URL  
-    2) **Optimize Existing Page**: pick an existing URL  
-    3) **Analyze Word Document**: skip headings, parse paragraphs only,  
-       and for each site page, we place the link in exactly one paragraph (the best match).
+    1) **Brand-New Topic/Page** (requires a Topic/Keyword, calls GPT).
+    2) **Optimize Existing Page** (requires a Topic/Keyword, calls GPT).
+    3) **Analyze Word Document** (skips headings, no GPT calls, just embeddings):
+       - For each site page, find the single doc paragraph with highest similarity.
+       - Then within that paragraph, pick the best matching sentence to serve as the anchor text.
+       - The result is one recommended anchor substring per site page.
     """)
 
     # Step 1: Download sample
     st.subheader("Step 1: (Optional) Download Site Template")
-    template_bytes = generate_sample_excel_template()
-    link = get_download_link(template_bytes, "sample_template.xlsx", "Download Sample Excel Template")
+    sample_xlsx = generate_sample_excel_template()
+    link = get_download_link(sample_xlsx, "sample_template.xlsx", "Download Sample Excel Template")
     st.markdown(link, unsafe_allow_html=True)
 
-    # Step 2: Upload site CSV/Excel
-    st.subheader("Step 2: Upload Site Pages")
-    pages_file = st.file_uploader("Site CSV/Excel (URL, H1, Meta Description)", type=["csv", "xlsx"])
+    # Step 2: Upload site pages
+    st.subheader("Step 2: Upload Site Pages (CSV/Excel)")
+    pages_file = st.file_uploader("Upload site CSV/Excel (URL, H1, Meta Description)", type=["csv", "xlsx"])
     df_pages = None
     if pages_file:
         try:
@@ -381,49 +304,54 @@ def main():
             else:
                 df_pages = pd.read_excel(pages_file)
         except Exception as e:
-            st.error(f"Error reading pages: {e}")
+            st.error(f"Error reading pages file: {e}")
 
     # Step 3: Mode
-    st.subheader("Step 3: Pick Mode")
+    st.subheader("Step 3: Choose Mode")
     mode_option = st.radio(
-        "Choose one:",
+        "Pick one:",
         ["Brand-New Topic/Page", "Optimize Existing Page", "Analyze Word Document"]
     )
 
     # If existing page, user picks
     selected_url = None
     if mode_option == "Optimize Existing Page" and df_pages is not None:
+        # check columns
         if {"URL", "H1", "Meta Description"}.issubset(df_pages.columns):
-            all_urls = df_pages["URL"].unique().tolist()
-            selected_url = st.selectbox("Existing Page URL", all_urls)
+            selected_url = st.selectbox("Target Page URL", df_pages["URL"].unique().tolist())
         else:
-            st.warning("Please upload a valid CSV/Excel with the required columns first.")
+            st.warning("Please upload valid CSV/Excel with the required columns.")
 
-    # If Word doc analysis, user uploads doc
+    # If Word doc analysis, parse paragraphs only
     doc_file = None
     doc_paragraphs = []
     if mode_option == "Analyze Word Document":
-        st.subheader("Step 3A: Upload Word Document (paragraphs only)")
-        doc_file = st.file_uploader("Upload .docx to parse paragraphs", type=["docx"])
+        st.subheader("Step 3A: Upload Word Document (.docx, skipping headings)")
+        doc_file = st.file_uploader("Upload your .docx", type=["docx"])
         if doc_file:
             try:
-                doc_bytes = doc_file.read()
-                doc_paragraphs = parse_word_doc_paragraphs_only(io.BytesIO(doc_bytes))
+                docx_data = doc_file.read()
+                doc_paragraphs = parse_word_doc_paragraphs_only(io.BytesIO(docx_data))
                 st.success(f"Found {len(doc_paragraphs)} paragraphs (no headings).")
             except Exception as e:
                 st.error(f"Error parsing Word doc: {e}")
 
-    # Step 4: Topic, Keyword
-    st.subheader("Step 4: Topic & Optional Keyword")
-    topic = st.text_input("Topic (required)")
-    keyword = st.text_input("Optional Keyword")
+    # Step 4: Topic + Keyword (only needed for brand-new / existing)
+    st.subheader("Step 4: Topic & (Optional) Keyword")
+    if mode_option in ["Brand-New Topic/Page", "Optimize Existing Page"]:
+        topic = st.text_input("Topic (required)")
+        keyword = st.text_input("Optional Keyword")
+    else:
+        # For Word doc, we skip forcing topic/keyword
+        topic = ""
+        keyword = ""
 
     # Step 5: OpenAI Key
-    st.subheader("Step 5: OpenAI API Key")
+    st.subheader("Step 5: OpenAI API Key (for embeddings, GPT in brand-new/existing)")
     openai_api_key = st.text_input("OpenAI Key", type="password")
 
-    # Step 6: Batch size
-    st.subheader("Step 6: Batch Size for Embedding")
+    # Step 6: Batch Size
+    st.subheader("Step 6: Set Batch Size for Embedding")
     batch_size = st.slider("Batch size", min_value=1, max_value=50, value=10)
 
     # Step 7: Embed
@@ -433,67 +361,53 @@ def main():
             st.error("Please provide an OpenAI key.")
             st.stop()
 
+        # Validate site pages
+        if not df_pages:
+            st.error("Please upload site pages first.")
+            st.stop()
+        required_cols = {"URL", "H1", "Meta Description"}
+        if not required_cols.issubset(df_pages.columns):
+            st.error(f"File missing columns: {', '.join(required_cols)}")
+            st.stop()
+
+        df_pages_emb = embed_site_pages_in_batches(df_pages.copy(), openai_api_key, batch_size)
+
+        # If brand-new / existing, we do nothing more
         if mode_option in ["Brand-New Topic/Page", "Optimize Existing Page"]:
-            if df_pages is None:
-                st.error("Please upload site pages first.")
-                st.stop()
+            if mode_option == "Brand-New Topic/Page":
+                if not topic:
+                    st.error("Please enter a topic.")
+                    st.stop()
+            elif mode_option == "Optimize Existing Page":
+                if not topic:
+                    st.error("Please enter a topic (for GPT).")
+                    st.stop()
+                if not selected_url:
+                    st.error("Please select a target URL.")
+                    st.stop()
 
-            required_cols = {"URL", "H1", "Meta Description"}
-            if not required_cols.issubset(df_pages.columns):
-                st.error(f"File missing columns: {', '.join(required_cols)}")
-                st.stop()
-
-            if not topic:
-                st.error("Please enter a topic.")
-                st.stop()
-
-            # Embed site pages
-            df_emb = df_pages.copy()
-            df_emb = embed_site_pages_in_batches(df_emb, openai_api_key, batch_size)
-
-            st.session_state["site_pages"] = df_emb
-            st.session_state["doc_paragraphs"] = None
             st.session_state["mode"] = mode_option
             st.session_state["topic"] = topic
             st.session_state["keyword"] = keyword
+            st.session_state["df_pages"] = df_pages_emb
             st.session_state["selected_url"] = selected_url
-
+            st.session_state["doc_paragraphs"] = None
             st.success("Site pages embedded. Proceed to Generate Links.")
 
         else:
             # analyze_word_doc
-            if df_pages is None:
-                st.error("Need site pages to compare with doc.")
-                st.stop()
             if not doc_paragraphs:
-                st.error("No paragraphs found or doc not uploaded.")
+                st.error("No doc paragraphs found.")
                 st.stop()
 
-            required_cols = {"URL", "H1", "Meta Description"}
-            if not required_cols.issubset(df_pages.columns):
-                st.error(f"Site file missing columns: {', '.join(required_cols)}")
-                st.stop()
-
-            if not topic:
-                st.error("Topic is required.")
-                st.stop()
-
-            # Embed site pages
-            df_pages_emb = df_pages.copy()
-            df_pages_emb = embed_site_pages_in_batches(df_pages_emb, openai_api_key, batch_size)
-
-            # Embed doc paragraphs
+            # 1) embed doc paragraphs
             df_doc_emb = embed_doc_paragraphs_in_batches(doc_paragraphs, openai_api_key, batch_size)
-
-            st.session_state["site_pages"] = df_pages_emb
-            st.session_state["doc_paragraphs"] = df_doc_emb.to_dict("records")
+            st.session_state["df_pages"] = df_pages_emb
+            st.session_state["df_doc_paragraphs"] = df_doc_emb
             st.session_state["mode"] = "analyze_word_doc"
-            st.session_state["topic"] = topic
-            st.session_state["keyword"] = keyword
-
             st.success("Site pages + doc paragraphs embedded. Proceed to Generate Links.")
 
-    # Step 8: Generate links
+    # Step 8: Generate Links
     st.subheader("Step 8: Generate Links")
     if st.button("Generate Links"):
         if "mode" not in st.session_state:
@@ -501,44 +415,33 @@ def main():
             st.stop()
 
         final_mode = st.session_state["mode"]
-        final_topic = st.session_state["topic"]
-        final_keyword = st.session_state["keyword"]
-        final_url = st.session_state.get("selected_url", None)
-        df_site = st.session_state.get("site_pages", None)
-        doc_paragraph_dicts = st.session_state.get("doc_paragraphs", None)
-
         if final_mode in ["Brand-New Topic/Page", "Optimize Existing Page"]:
-            # Same logic as before
-            if df_site is None:
-                st.error("No embedded site data found.")
-                st.stop()
+            # GPT-based approach
+            final_topic = st.session_state["topic"]
+            final_keyword = st.session_state["keyword"]
+            df_pages_embedded = st.session_state["df_pages"]
+            final_url = st.session_state.get("selected_url", None)
 
             if final_mode == "Optimize Existing Page" and final_url:
-                try:
-                    target_row = df_site.loc[df_site["URL"] == final_url].iloc[0].to_dict()
-                except IndexError:
-                    st.error("Selected URL not found in embedded dataset.")
-                    st.stop()
+                # gather top pages for GPT
+                # exclude the target page
+                target_row = df_pages_embedded.loc[df_pages_embedded["URL"] == final_url].iloc[0].to_dict()
+                candidate_df = df_pages_embedded.loc[df_pages_embedded["URL"] != final_url]
 
-                # exclude from candidate
-                candidate_df = df_site.loc[df_site["URL"] != final_url].copy()
-
-                # do similarity
-                query_str = final_topic if not final_keyword else f"{final_topic} {final_keyword}"
-                one_batch = embed_text_batch(openai_api_key, [query_str])
-                if not one_batch or not one_batch[0]:
-                    st.error("Query embedding failed.")
-                    st.stop()
-                q_vec = np.array(one_batch[0])
-
-                sims = []
-                for i, row in candidate_df.iterrows():
-                    page_vec = np.array(row["embedding"])
-                    sims.append(compute_cosine_similarity(q_vec, page_vec))
-                candidate_df["similarity"] = sims
-                candidate_df_sorted = candidate_df.sort_values("similarity", ascending=False).head(50)
-                threshold = 0.50
-                filtered = candidate_df_sorted[candidate_df_sorted["similarity"] >= threshold].copy()
+                # do optional semantic search based on topic
+                if final_topic:
+                    # embed query
+                    combined_query = final_topic + " " + final_keyword if final_keyword else final_topic
+                    q_emb = embed_text_batch(openai_api_key, [combined_query])
+                    if q_emb and q_emb[0]:
+                        sims = []
+                        for i, row in candidate_df.iterrows():
+                            sim_val = compute_cosine_similarity(np.array(q_emb[0]), np.array(row["embedding"]))
+                            sims.append(sim_val)
+                        candidate_df["similarity"] = sims
+                        candidate_df = candidate_df.sort_values("similarity", ascending=False).head(50)
+                        threshold = 0.50
+                        candidate_df = candidate_df[candidate_df["similarity"] >= threshold].copy()
 
                 final_links = generate_internal_links(
                     openai_api_key,
@@ -546,26 +449,38 @@ def main():
                     final_topic,
                     final_keyword,
                     target_row,
-                    filtered[["URL", "H1", "Meta Description"]]
+                    candidate_df[["URL", "H1", "Meta Description"]]
                 )
 
-            else:
-                # brand_new
-                query_str = final_topic if not final_keyword else f"{final_topic} {final_keyword}"
-                one_batch = embed_text_batch(openai_api_key, [query_str])
-                if not one_batch or not one_batch[0]:
-                    st.error("Query embedding failed.")
-                    st.stop()
-                q_vec = np.array(one_batch[0])
+                if not final_links:
+                    st.warning("No recommendations returned or invalid JSON.")
+                else:
+                    df_out = pd.DataFrame(final_links)
+                    st.dataframe(df_out)
+                    st.download_button(
+                        "Download CSV",
+                        df_out.to_csv(index=False).encode("utf-8"),
+                        file_name=f"existing_page_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                    )
 
-                sims = []
-                for i, row in df_site.iterrows():
-                    page_vec = np.array(row["embedding"])
-                    sims.append(compute_cosine_similarity(q_vec, page_vec))
-                df_site["similarity"] = sims
-                df_site_sorted = df_site.sort_values("similarity", ascending=False).head(50)
-                threshold = 0.50
-                filtered = df_site_sorted[df_site_sorted["similarity"] >= threshold].copy()
+            else:
+                # brand-new
+                final_topic = st.session_state["topic"]
+                final_keyword = st.session_state["keyword"]
+                df_pages_embedded = st.session_state["df_pages"]
+
+                if final_topic:
+                    combined_query = final_topic + " " + final_keyword if final_keyword else final_topic
+                    q_emb = embed_text_batch(openai_api_key, [combined_query])
+                    if q_emb and q_emb[0]:
+                        sims = []
+                        for i, row in df_pages_embedded.iterrows():
+                            sim_val = compute_cosine_similarity(np.array(q_emb[0]), np.array(row["embedding"]))
+                            sims.append(sim_val)
+                        df_pages_embedded["similarity"] = sims
+                        df_pages_embedded = df_pages_embedded.sort_values("similarity", ascending=False).head(50)
+                        threshold = 0.50
+                        df_pages_embedded = df_pages_embedded[df_pages_embedded["similarity"] >= threshold].copy()
 
                 target_data = {
                     "URL": "N/A",
@@ -578,106 +493,96 @@ def main():
                     final_topic,
                     final_keyword,
                     target_data,
-                    filtered[["URL", "H1", "Meta Description"]]
+                    df_pages_embedded[["URL", "H1", "Meta Description"]]
                 )
-
-            if not final_links:
-                st.warning("No recommendations returned or invalid JSON.")
-            else:
-                res_df = pd.DataFrame(final_links)
-                if 'filtered' in locals() and not filtered.empty:
-                    merged = pd.merge(
-                        res_df,
-                        filtered[["URL", "similarity"]],
-                        left_on="target_url",
-                        right_on="URL",
-                        how="left"
-                    )
-                    merged.drop(columns=["URL"], inplace=True, errors="ignore")
-                    if "similarity" in merged.columns:
-                        merged.rename(columns={"similarity": "similarity_score"}, inplace=True)
+                if not final_links:
+                    st.warning("No recommendations returned or invalid JSON.")
                 else:
-                    merged = res_df.copy()
-
-                st.write("**Recommendations**")
-                st.dataframe(merged)
-                csv_data = merged.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "Download CSV",
-                    csv_data,
-                    file_name=f"links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-                )
+                    df_out = pd.DataFrame(final_links)
+                    st.dataframe(df_out)
+                    st.download_button(
+                        "Download CSV",
+                        df_out.to_csv(index=False).encode("utf-8"),
+                        file_name=f"brand_new_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                    )
 
         else:
-            # analyze_word_doc with paragraphs only
-            if df_site is None or not doc_paragraph_dicts:
-                st.error("Missing data for pages or doc paragraphs.")
-                st.stop()
+            # analyze_word_doc -> purely embeddings
+            df_pages_emb = st.session_state["df_pages"]
+            df_doc_emb = st.session_state["df_doc_paragraphs"]
 
-            # For each SITE PAGE, we find which doc paragraph is the best match.
-            # Then we call GPT to pick a substring from that paragraph text.
-
-            # We'll produce one link suggestion per site page (so each page is unique).
+            # We'll pick for each site page the single doc paragraph with highest similarity
+            # then from that paragraph, we pick the best sentence
             results = []
-            for i, site_row in df_site.iterrows():
-                site_vec = np.array(site_row["embedding"])
+            threshold = 0.50
 
-                # Find best paragraph
-                best_sim = -1
-                best_idx = -1
-                for idx, para_dict in enumerate(doc_paragraph_dicts):
-                    para_vec = np.array(para_dict["embedding"])
-                    sim = compute_cosine_similarity(site_vec, para_vec)
-                    if sim > best_sim:
-                        best_sim = sim
-                        best_idx = idx
+            for i, page_row in df_pages_emb.iterrows():
+                page_vec = np.array(page_row["embedding"])
+                best_para_idx = -1
+                best_para_sim = -1.0
 
-                if best_sim < 0.50:
-                    # If no paragraph above threshold, skip
+                # 1) find best paragraph
+                for idx_para, doc_row in df_doc_emb.iterrows():
+                    para_vec = np.array(doc_row["embedding"])
+                    sim_val = compute_cosine_similarity(page_vec, para_vec)
+                    if sim_val > best_para_sim:
+                        best_para_sim = sim_val
+                        best_para_idx = idx_para
+
+                if best_para_sim < threshold:
+                    # skip if below threshold
                     continue
 
-                # We have the best paragraph for this site page
-                chosen_para = doc_paragraph_dicts[best_idx]
-                # Now call GPT to pick a substring
-                snippet_text = chosen_para["content"]
-                chosen_page = {
-                    "URL": site_row["URL"],
-                    "H1": site_row["H1"],
-                    "Meta Description": site_row["Meta Description"]
-                }
+                # 2) best paragraph
+                best_para = df_doc_emb.loc[best_para_idx]
+                paragraph_text = best_para["content"]
 
-                substring_resp = pick_substring_for_link(openai_api_key, snippet_text, chosen_page)
-                if not substring_resp:
-                    # GPT returned nothing or invalid
-                    continue
+                # 3) split paragraph into sentences, embed them, pick best
+                #    This ensures we pick a substring from the paragraph text
+                sents = re.split(r'(?<=[.!?])\s+', paragraph_text.strip())
+                sents = [s.strip() for s in sents if s.strip()]
 
-                anchor_substring = substring_resp[0].get("anchor_substring", "")
-                if not anchor_substring:
-                    # no good substring
+                if not sents:
                     continue
+                sent_embeddings = embed_text_batch(openai_api_key, sents)
+                best_sent_idx = -1
+                best_sent_sim = -1.0
+                for s_idx, s_emb in enumerate(sent_embeddings):
+                    sim_val = compute_cosine_similarity(page_vec, np.array(s_emb))
+                    if sim_val > best_sent_sim:
+                        best_sent_sim = sim_val
+                        best_sent_idx = s_idx
+
+                if best_sent_sim < threshold:
+                    # no good sentence match
+                    continue
+                anchor_substring = sents[best_sent_idx]
 
                 results.append({
-                    "page_url": chosen_page["URL"],
-                    "paragraph_index": best_idx,
-                    "paragraph_text": snippet_text,
-                    "anchor_substring": anchor_substring,
-                    "similarity_score": best_sim
+                    "page_url": page_row["URL"],
+                    "page_title": page_row["H1"],
+                    "paragraph_index": best_para_idx,
+                    "paragraph_text": paragraph_text,
+                    "chosen_sentence": anchor_substring,
+                    "similarity_paragraph": best_para_sim,
+                    "similarity_sentence": best_sent_sim
                 })
 
             if not results:
-                st.warning("No link suggestions found or all below threshold.")
+                st.warning("No link suggestions found (all below threshold).")
             else:
                 final_df = pd.DataFrame(results)
-                st.write("**One Link per Site Page (Word Doc Paragraph)**")
+                st.write("**Recommended Anchor Substrings (One per Site Page)**")
                 st.dataframe(final_df)
 
                 csv_data = final_df.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "Download CSV",
                     csv_data,
-                    file_name=f"word_doc_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    file_name=f"doc_links_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                     mime="text/csv"
                 )
+
 
 if __name__ == "__main__":
     main()
