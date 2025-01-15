@@ -1,6 +1,6 @@
-streamlit==1.26.0
-pandas==2.1.0
+streamlit
+pandas
 openai==0.27.8
-numpy>=1.24.3
-openpyxl==3.1.2
-pillow>=10.0.0
+numpy
+openpyxl
+pillow
