@@ -7,7 +7,6 @@ import base64
 import numpy as np
 from openpyxl import Workbook
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ###############################################################################
 # Helper functions
@@ -131,7 +130,7 @@ def generate_internal_links(openai_api_key: str, target_page: dict, topic: str, 
 
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",  # or "gpt-4o-mini", etc.
+            model="gpt-4o-mini",  # or "gpt-4o-2024-05-13", etc.
             messages=[
                 {"role": "system", "content": "You are a helpful AI assistant specialized in SEO recommendations."},
                 {"role": "user", "content": prompt}
@@ -158,29 +157,29 @@ def convert_to_excel(df: pd.DataFrame) -> bytes:
         df.to_excel(writer, index=False, sheet_name="InternalLinkSuggestions")
     return buffer.getvalue()
 
-
 ###############################################################################
-# Vectorization and Semantic Search
+# Vectorization, Batch Embedding, and Semantic Search
 ###############################################################################
-def embed_text(openai_api_key: str, text: str) -> list:
+def embed_text_batch(openai_api_key: str, texts: list[str]) -> list[list[float]]:
     """
-    Generates a vector embedding for the given text using OpenAI's Embeddings API.
-    Returns a list of floats representing the embedding.
+    Generates embeddings for a batch of texts in a single API call using OpenAI's Embeddings API.
+    Returns a list of embeddings, one per input text.
     """
     openai.api_key = openai_api_key
     try:
         response = openai.Embedding.create(
             model="text-embedding-ada-002",
-            input=text
+            input=texts  # list of strings
         )
-        embedding = response["data"][0]["embedding"]
-        return embedding
+        # The embeddings come back in "data" in the same order as the input
+        embeddings = [item["embedding"] for item in response["data"]]
+        return embeddings
     except Exception as e:
-        st.error(f"Error generating embedding: {e}")
-        return []
+        st.error(f"Error generating batch embeddings: {e}")
+        return [[] for _ in texts]  # return empty placeholders if failed
 
 
-def compute_cosine_similarity(vec_a: np.array, vec_b: np.array) -> float:
+def compute_cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
     """
     Computes the cosine similarity between two vectors.
     """
@@ -189,34 +188,39 @@ def compute_cosine_similarity(vec_a: np.array, vec_b: np.array) -> float:
     return float(np.dot(vec_a, vec_b) / (np.linalg.norm(vec_a) * np.linalg.norm(vec_b)))
 
 
-def embed_pages_concurrently(df: pd.DataFrame, openai_api_key: str, max_workers: int = 5) -> pd.DataFrame:
+def embed_pages_in_batches(df: pd.DataFrame, openai_api_key: str, batch_size: int = 10) -> pd.DataFrame:
     """
-    Compute embeddings for each page concurrently.
-    Adds a new column "embedding" with the resulting vector.
+    Compute embeddings for each page in batches (reducing the number of API calls).
+    Adds a new column "embedding" to the DataFrame.
     """
-    st.info("Embedding each page concurrently. This may take a moment...")
+    st.info("Embedding pages in batches. Please wait...")
 
-    def embed_row(row):
-        # Combine your relevant fields for embedding
+    # We'll combine URL + H1 + Meta Description
+    texts = []
+    for _, row in df.iterrows():
         combined_text = f"{row['URL']} {row['H1']} {row['Meta Description']}"
-        return embed_text(openai_api_key, combined_text)
+        texts.append(combined_text)
 
-    # Prepare data for concurrency
-    rows = df.to_dict("records")
-    embeddings = [None] * len(rows)
+    all_embeddings = []
+    n = len(texts)
+    for start_idx in range(0, n, batch_size):
+        end_idx = start_idx + batch_size
+        batch_texts = texts[start_idx:end_idx]
+        # Single API call for the batch
+        batch_embeddings = embed_text_batch(openai_api_key, batch_texts)
+        all_embeddings.extend(batch_embeddings)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for i, row in enumerate(rows):
-            future = executor.submit(embed_row, row)
-            futures[future] = i
-
-        for future in as_completed(futures):
-            i = futures[future]
-            embeddings[i] = future.result()
-
-    df["embedding"] = embeddings
+    # Assign embeddings to the DataFrame
+    df["embedding"] = all_embeddings
     return df
+
+
+def embed_query(query: str, openai_api_key: str) -> np.ndarray:
+    """
+    Embed a single query string (topic + keyword).
+    """
+    results = embed_text_batch(openai_api_key, [query])
+    return np.array(results[0]) if results else np.array([])
 
 
 def semantic_search(df: pd.DataFrame, query: str, openai_api_key: str, top_k: int = 10) -> pd.DataFrame:
@@ -224,8 +228,8 @@ def semantic_search(df: pd.DataFrame, query: str, openai_api_key: str, top_k: in
     Given a DataFrame of pages (with "embedding" column),
     embed the query, compute similarity, and return top_k results (sorted by similarity).
     """
-    query_embedding = embed_text(openai_api_key, query)
-    if not query_embedding:
+    query_embedding = embed_query(query, openai_api_key)
+    if query_embedding.size == 0:
         return df.head(0)  # Return empty if something went wrong
 
     similarities = []
@@ -243,16 +247,15 @@ def semantic_search(df: pd.DataFrame, query: str, openai_api_key: str, top_k: in
     # Return top_k
     return df_sorted.head(top_k)
 
-
 ###############################################################################
 # Streamlit App
 ###############################################################################
 def main():
-    st.title("Internal Link Recommender Tool (Embeddings + Concurrency)")
+    st.title("Internal Link Recommender Tool (Batch Embedding)")
     st.write("""
     This application helps SEO professionals generate internal link recommendations
-    for a specific topic and an optional target keyword, using text embeddings
-    for semantic matching and concurrent embedding generation for speed.
+    for a specific topic and an optional target keyword, using **batch embeddings**
+    to reduce the number of API calls and speed up processing.
     """)
 
     # Provide a link to download the sample Excel template
@@ -285,9 +288,9 @@ def main():
         help="Your OpenAI API key. Get yours at https://platform.openai.com/."
     )
 
-    # User can set concurrency level if desired
-    st.subheader("Optional: Set Concurrency Level for Embedding")
-    max_workers = st.slider("Max Workers (Threads)", min_value=1, max_value=20, value=5)
+    # Batch Size selection
+    st.subheader("Optional: Set Batch Size for Embedding")
+    batch_size = st.slider("Number of pages to embed per request", min_value=1, max_value=50, value=10)
 
     # Create a button to trigger link generation
     if st.button("Generate Links"):
@@ -319,9 +322,9 @@ def main():
             st.error(f"Uploaded file must contain columns: {', '.join(required_columns)}")
             return
 
-        # Build embeddings for each page (concurrently)
+        # Build embeddings for each page in batches
         try:
-            df = embed_pages_concurrently(df, openai_api_key, max_workers=max_workers)
+            df = embed_pages_in_batches(df, openai_api_key, batch_size=batch_size)
         except Exception as e:
             st.error(f"Error building embeddings: {e}")
             return
@@ -344,7 +347,6 @@ def main():
         query_text = topic if not keyword else f"{topic} {keyword}"
 
         # Find top K most relevant pages using semantic search
-        # Increase or decrease top_k as you prefer
         top_k = 20  
         best_matches = semantic_search(candidate_df, query_text, openai_api_key, top_k=top_k)
 
