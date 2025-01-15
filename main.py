@@ -231,7 +231,7 @@ def generate_internal_links(openai_api_key:str, mode:str, topic:str, keyword:str
             messages=[
                 {
                     "role":"system",
-                    "content":"You are a helpful SEO assistant. Return valid JSON only. No disclaimers."
+                    "content":"You are a helpful SEO assistant. Return valid JSON only. No disclaimers, no code fences, no extra text."
                 },
                 {
                     "role":"user",
