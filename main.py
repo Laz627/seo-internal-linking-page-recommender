@@ -158,15 +158,15 @@ def embed_doc_paragraphs(paragraphs: list[dict], openai_api_key: str, batch_size
 # 4. Streamlit App
 ###############################################################################
 def main():
-    st.title("Word Document to Site Pages (One-to-One Matching)")
+    st.title("Internal Linking Generator For Content Drafts")
     st.write("""
     **What this tool does**:
-    1. Upload a list of site pages (CSV/Excel).
+    1. Upload a list of your site pages (CSV/Excel) that include your site's URLs, H1s, and meta descriptions.
     2. Upload a Word document (.docx) of paragraphs (skipping headings).
-    3. Each paragraph picks exactly **one** best-match site page
+    3. Each paragraph picks exactly **one** best-match site page to internally link to.
        (≥ 80% similarity), then **removes** that page from the pool
        so it can’t be used again.
-    4. You can review the matches and download a CSV of results.
+    4. You can review the matches and download a CSV of results to add to your content draft
 
     **How to Use**:
     1. (Optional) Download the sample site pages template.
