@@ -219,8 +219,8 @@ def main():
     # EMBED
     st.subheader("Step 6: Embed Now")
     if st.button("Embed Data"):
-        if not df_pages or df_pages.empty:
-            st.error("Please upload valid site pages CSV/Excel first.")
+        if df_pages is None or df_pages.empty:
+            st.error("Please upload site pages first or ensure your CSV/Excel isn't empty.")
             st.stop()
         required_cols = {"URL","H1","Meta Description"}
         if not required_cols.issubset(df_pages.columns):
