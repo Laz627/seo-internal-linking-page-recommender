@@ -9,6 +9,7 @@ import re
 from docx import Document
 from datetime import datetime
 from openpyxl import Workbook
+from typing import List
 
 ###############################################################################
 # 1. Utility Functions
@@ -76,7 +77,7 @@ def parse_word_doc_paragraphs_only(doc_bytes: bytes):
 ###############################################################################
 # 3. Embedding Site Pages & Doc Paragraphs
 ###############################################################################
-def embed_text_batch(openai_api_key: str, texts: list[str], model="text-embedding-ada-002"):
+def embed_text_batch(openai_api_key: str, texts: List[str], model="text-embedding-ada-002"):
     """
     Batch call to OpenAI's Embeddings API for a list of strings.
     """
