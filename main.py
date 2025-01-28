@@ -311,14 +311,14 @@ def main():
             # Download CSV
             df_final = pd.DataFrame(results)
             st.subheader("Download CSV of Matches")
-            csv_data = df_final.to_csv(index=False).encode("utf-8")
+            csv_data = df_final.to_csv(index=False, encoding="utf-8") # Correct encoding in to_csv
             st.download_button(
-                "Download CSV",
-                csv_data,
+                label="Download CSV", # More descriptive label
+                data=csv_data, # Directly use the CSV string
                 file_name=f"doc_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
             )
-
+            )
 
 if __name__=="__main__":
     main()
