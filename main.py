@@ -318,7 +318,6 @@ def main():
                 file_name=f"doc_matches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
             )
-            )
 
 if __name__=="__main__":
     main()
