@@ -9,7 +9,7 @@ import re
 from docx import Document
 from datetime import datetime
 from openpyxl import Workbook
-from typing import List
+from typing import List, Dict
 
 ###############################################################################
 # 1. Utility Functions
@@ -123,7 +123,7 @@ def embed_site_pages(df: pd.DataFrame, openai_api_key: str, batch_size: int=10)-
     return df
 
 
-def embed_doc_paragraphs(paragraphs: list[dict], openai_api_key: str, batch_size: int=10)->list[dict]:
+def embed_doc_paragraphs(paragraphs: List[Dict], openai_api_key: str, batch_size: int=10) -> List[Dict]:
     """
     Embed each doc paragraph. Optionally embed sentences if you like.
     """
