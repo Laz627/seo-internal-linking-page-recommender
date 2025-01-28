@@ -6,6 +6,7 @@ import io
 import base64
 import numpy as np
 import re
+import docx
 from docx import Document
 from datetime import datetime
 from openpyxl import Workbook
